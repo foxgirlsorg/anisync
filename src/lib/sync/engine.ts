@@ -35,27 +35,34 @@ type DiffFields = Partial<{
   customLists: boolean;
 }>;
 
-/** Whether `desired` (from the source list) differs from `existing` (the
- * destination's current entry) in any field this destination is configured
- * to sync — used to skip write calls entirely for entries that are already
- * up to date, instead of re-writing every entry on every sync. */
-function hasNonScoreChanges(desired: NormalizedEntry, existing: NormalizedEntry, fields: DiffFields): boolean {
-  if (fields.status && desired.status !== existing.status) return true;
+/**
+ * Which fields differ between `desired` (from the source list) and
+ * `existing` (the destination's current entry) among the ones this
+ * destination is configured to sync — an empty array means the entry is
+ * already up to date and the write call can be skipped entirely.
+ *
+ * `notes` and `customLists` are deliberately NOT compared here: they're
+ * lossy, non-corresponding text/tags across services (MAL tags vs AniList
+ * custom lists vs Shikimori's plain text field don't match syntactically
+ * even when conceptually "the same"), so comparing them would report a
+ * difference on nearly every entry, every run, defeating the point of
+ * diffing at all. They still get included in the actual write whenever a
+ * write happens for another reason — they just don't gate it on their own.
+ */
+function diffFields(desired: NormalizedEntry, existing: NormalizedEntry, fields: DiffFields): string[] {
+  const diffs: string[] = [];
+  if (fields.status && desired.status !== existing.status) diffs.push("status");
   if (fields.progress) {
-    if (desired.progress !== existing.progress) return true;
-    if (desired.mediaKind === "MANGA" && (desired.progressVolumes ?? 0) !== (existing.progressVolumes ?? 0)) return true;
+    if (desired.progress !== existing.progress) diffs.push("progress");
+    if (desired.mediaKind === "MANGA" && (desired.progressVolumes ?? 0) !== (existing.progressVolumes ?? 0)) {
+      diffs.push("progressVolumes");
+    }
   }
-  if (fields.notes && (desired.notes ?? "") !== (existing.notes ?? "")) return true;
-  if (fields.rewatches && desired.repeatCount !== existing.repeatCount) return true;
-  if (fields.priority && desired.priority !== existing.priority) return true;
-  if (fields.startDate && desired.startDate !== existing.startDate) return true;
-  if (fields.finishDate && desired.finishDate !== existing.finishDate) return true;
-  if (fields.customLists) {
-    const a = [...desired.customLists].sort().join(",");
-    const b = [...existing.customLists].sort().join(",");
-    if (a !== b) return true;
-  }
-  return false;
+  if (fields.rewatches && desired.repeatCount !== existing.repeatCount) diffs.push("rewatches");
+  if (fields.priority && desired.priority !== existing.priority) diffs.push("priority");
+  if (fields.startDate && desired.startDate !== existing.startDate) diffs.push("startDate");
+  if (fields.finishDate && desired.finishDate !== existing.finishDate) diffs.push("finishDate");
+  return diffs;
 }
 
 async function fetchSourceEntries(service: ServiceId, conn: ServiceConnection): Promise<NormalizedEntry[]> {
@@ -102,16 +109,23 @@ async function applyToMal(entries: NormalizedEntry[], conn: ServiceConnection, d
   };
   for (const entry of entries) {
     const existing = existingByKey.get(`${entry.mediaKind}:${entry.malId}`);
+    let diffs: string[] = [];
     if (existing) {
       const scoreTarget = writeFields.score ? universalToTenPointInt(entry.score, writeFields.ratingRoundMode) : null;
-      const scoreChanged = scoreTarget != null && scoreTarget !== Math.round(existing.score);
-      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+      if (scoreTarget != null && scoreTarget !== Math.round(existing.score)) diffs.push("score");
+      diffs = diffs.concat(diffFields(entry, existing, writeFields));
+      if (diffs.length === 0) {
         result.unchanged++;
         continue;
       }
     }
     try {
-      log.info(existing ? "updating entry" : "creating entry", { destination: "MAL", malId: entry.malId, title: entry.title });
+      log.info(existing ? "updating entry" : "creating entry", {
+        destination: "MAL",
+        malId: entry.malId,
+        title: entry.title,
+        diffs: existing ? diffs : undefined,
+      });
       await mal.upsertEntry(token, entry, writeFields);
       if (existing) result.updated++;
       else result.created++;
@@ -197,19 +211,26 @@ async function applyToAnilist(
       result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: "Not found on AniList" });
       continue;
     }
+    let diffs: string[] = [];
     if (existing) {
       const scoreTarget = writeFields.score
         ? universalToAnilistScore(entry.score, destScoreFormat, writeFields.ratingRoundMode)
         : null;
       const currentScore = writeFields.score ? universalToAnilistScore(existing.score, destScoreFormat, "NEAREST") : null;
-      const scoreChanged = scoreTarget != null && Math.abs(scoreTarget - currentScore!) > 0.05;
-      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+      if (scoreTarget != null && Math.abs(scoreTarget - currentScore!) > 0.05) diffs.push("score");
+      diffs = diffs.concat(diffFields(entry, existing, writeFields));
+      if (diffs.length === 0) {
         result.unchanged++;
         continue;
       }
     }
     try {
-      log.info(existing ? "updating entry" : "creating entry", { destination: "ANILIST", malId: entry.malId, title: entry.title });
+      log.info(existing ? "updating entry" : "creating entry", {
+        destination: "ANILIST",
+        malId: entry.malId,
+        title: entry.title,
+        diffs: existing ? diffs : undefined,
+      });
       await anilist.upsertEntry(token, mediaId, entry, destScoreFormat, writeFields);
       if (existing) result.updated++;
       else result.created++;
@@ -286,17 +307,19 @@ async function applyToShikimori(
     const existingMap = existingByKind[entry.mediaKind];
     const rateIdMap = rateIdByKind[entry.mediaKind];
     const existing = existingMap.get(entry.malId);
+    let diffs: string[] = [];
     if (existing) {
       const scoreTarget = writeFields.score ? universalToTenPointInt(entry.score, writeFields.ratingRoundMode) : null;
-      const scoreChanged = scoreTarget != null && scoreTarget !== Math.round(existing.score);
-      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+      if (scoreTarget != null && scoreTarget !== Math.round(existing.score)) diffs.push("score");
+      diffs = diffs.concat(diffFields(entry, existing, writeFields));
+      if (diffs.length === 0) {
         result.unchanged++;
         continue;
       }
     }
     try {
       if (existing) {
-        log.info("updating entry", { destination: "SHIKIMORI", malId: entry.malId, title: entry.title });
+        log.info("updating entry", { destination: "SHIKIMORI", malId: entry.malId, title: entry.title, diffs });
         await shikimori.updateEntry(token, creds.appName, rateIdMap.get(entry.malId)!, entry, writeFields);
         result.updated++;
       } else {
