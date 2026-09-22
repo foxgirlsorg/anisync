@@ -43,6 +43,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# docker compose bind-mounts real database files here
+/db/
+
 # prisma (rendered from schema.template.prisma by scripts/select-db.js)
 /prisma/schema.prisma
 /prisma/migrations/

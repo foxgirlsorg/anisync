@@ -62,11 +62,14 @@ docker compose up -d --build
 ```
 
 This starts the web app (port `3000`) and a background worker that checks
-hourly for accounts due their 24h auto-sync, both backed by SQLite in a named
-volume. Open `http://localhost:3000`, register the first (admin) account,
-then go to **Admin → Integrations** to add OAuth app credentials for
-whichever services you want to support — each one's redirect URI is shown in
-that form.
+hourly for accounts due their 24h auto-sync, both backed by SQLite stored in
+`./db` next to this repo (a bind mount, not a named volume — named volumes
+are keyed by the Compose project name, which defaults to the directory name,
+so cloning or moving the repo to a differently-named path silently gets you
+a fresh empty volume; a fixed host path avoids that). Open
+`http://localhost:3000`, register the first (admin) account, then go to
+**Admin → Integrations** to add OAuth app credentials for whichever services
+you want to support — each one's redirect URI is shown in that form.
 
 To use MariaDB instead of SQLite:
 

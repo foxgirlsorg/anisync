@@ -9,7 +9,7 @@ services:
     environment:
       DB_PROVIDER: ${DB_PROVIDER:-sqlite}
     volumes:
-      - sqlite-data:/app/prisma/data
+      - ./db:/app/prisma/data
     depends_on:
       db:
         condition: service_healthy
@@ -23,7 +23,7 @@ services:
     environment:
       DB_PROVIDER: ${DB_PROVIDER:-sqlite}
     volumes:
-      - sqlite-data:/app/prisma/data
+      - ./db:/app/prisma/data
     depends_on:
       app:
         condition: service_started
@@ -43,13 +43,9 @@ services:
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:-anisync}
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-changeme}
     volumes:
-      - mariadb-data:/var/lib/mysql
+      - ./db/mariadb:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
       timeout: 5s
       retries: 10
-
-volumes:
-  sqlite-data:
-  mariadb-data:
