@@ -1,0 +1,10 @@
+node_modules
+.next
+.git
+prisma/dev.db
+prisma/dev.db-journal
+prisma/schema.prisma
+prisma/migrations
+.env
+.env.local
+src/generated
