@@ -2,11 +2,14 @@ import { prisma } from "@/lib/db";
 import { ServiceId, RatingRoundMode } from "@/lib/constants";
 import { getFreshAccessToken } from "@/lib/providers/connection";
 import { getShikimoriCredentials } from "@/lib/settings";
+import { createLogger } from "@/lib/logger";
 import type { NormalizedEntry, SkippedEntry } from "@/lib/providers/types";
 import * as mal from "@/lib/providers/mal";
 import * as anilist from "@/lib/providers/anilist";
 import * as shikimori from "@/lib/providers/shikimori";
 import type { SyncDestinationConfig, ServiceConnection } from "@/generated/prisma";
+
+const log = createLogger("sync");
 
 type DestinationResult = { created: number; updated: number; skipped: number; skippedEntries: SkippedEntry[] };
 
@@ -45,7 +48,7 @@ async function applyToMal(entries: NormalizedEntry[], conn: ServiceConnection, d
     progress: dest.importProgress,
     score: dest.importRatings,
     ratingRoundMode: dest.ratingRoundMode as RatingRoundMode,
-    comments: dest.importComments,
+    notes: dest.importNotes,
     startDate: dest.importStartDate,
     finishDate: dest.importFinishDate,
     rewatches: dest.importRewatches,
@@ -112,7 +115,7 @@ async function applyToAnilist(
     progress: dest.importProgress,
     score: dest.importRatings,
     ratingRoundMode: dest.ratingRoundMode as RatingRoundMode,
-    comments: dest.importComments,
+    notes: dest.importNotes,
     startDate: dest.importStartDate,
     finishDate: dest.importFinishDate,
     rewatches: dest.importRewatches,
@@ -173,19 +176,23 @@ async function applyToShikimori(
   const creds = await getShikimoriCredentials();
   if (!creds) throw new Error("Shikimori credentials are not configured");
   const token = await getFreshAccessToken(conn.userId, "SHIKIMORI");
-  const [existingAnime, existingManga] = await Promise.all([
-    dest.importAnime ? shikimori.fetchAnimeList(token, conn.externalUserId!, creds.appName) : Promise.resolve([]),
-    dest.importManga ? shikimori.fetchMangaList(token, conn.externalUserId!, creds.appName) : Promise.resolve([]),
+  // One paginated GraphQL fetch per media kind gives us both the normalized
+  // entries AND the rate id we need for updates/deletes — fetching it twice
+  // (as an earlier version of this did) doubled Shikimori API calls per
+  // sync, which its 90-req/min rate limit does not have room for.
+  const [animeResult, mangaResult] = await Promise.all([
+    dest.importAnime
+      ? shikimori.fetchAnimeListWithRateIds(token, conn.externalUserId!, creds.appName)
+      : Promise.resolve({ entries: [], rateIds: new Map<number, string>() }),
+    dest.importManga
+      ? shikimori.fetchMangaListWithRateIds(token, conn.externalUserId!, creds.appName)
+      : Promise.resolve({ entries: [], rateIds: new Map<number, string>() }),
   ]);
   const existingByKind = {
-    ANIME: new Map(existingAnime.map((e) => [e.malId, e])),
-    MANGA: new Map(existingManga.map((e) => [e.malId, e])),
+    ANIME: new Map(animeResult.entries.map((e) => [e.malId, e])),
+    MANGA: new Map(mangaResult.entries.map((e) => [e.malId, e])),
   };
-  // We need Shikimori's own rate id to update/delete an existing entry, but
-  // NormalizedEntry doesn't carry it — re-fetch minimally via a side map.
-  // (fetchAnimeList/fetchMangaList already did the GraphQL round-trip above;
-  // this keeps the rate id alongside without changing the shared type.)
-  const rateIdByKind = await fetchRateIds(token, creds.appName, conn.externalUserId!, dest);
+  const rateIdByKind = { ANIME: animeResult.rateIds, MANGA: mangaResult.rateIds };
 
   const result: DestinationResult = { created: 0, updated: 0, skipped: 0, skippedEntries: [] };
   const writeFields = {
@@ -193,7 +200,7 @@ async function applyToShikimori(
     progress: dest.importProgress,
     score: dest.importRatings,
     ratingRoundMode: dest.ratingRoundMode as RatingRoundMode,
-    comments: dest.importComments,
+    notes: dest.importNotes,
     rewatches: dest.importRewatches,
   };
 
@@ -239,52 +246,6 @@ async function applyToShikimori(
   return result;
 }
 
-/** GraphQL reads don't expose the rate id per malId directly in a convenient
- * shape for updates, so pull id+malId pairs separately, scoped to what this
- * destination actually imports. */
-async function fetchRateIds(
-  token: string,
-  userAgent: string,
-  externalUserId: string,
-  dest: SyncDestinationConfig
-): Promise<{ ANIME: Map<number, string>; MANGA: Map<number, string> }> {
-  const { GraphQLClient, gql } = await import("graphql-request");
-  const client = new GraphQLClient("https://shikimori.io/api/graphql", {
-    headers: { Authorization: `Bearer ${token}`, "User-Agent": userAgent },
-  });
-  const query = gql`
-    query ($userId: ID!, $targetType: UserRateTargetTypeEnum, $page: PositiveInt) {
-      userRates(userId: $userId, targetType: $targetType, page: $page, limit: 50) {
-        id
-        anime {
-          malId
-        }
-        manga {
-          malId
-        }
-      }
-    }
-  `;
-  const out = { ANIME: new Map<number, string>(), MANGA: new Map<number, string>() };
-  for (const [kind, targetType, enabled] of [
-    ["ANIME", "Anime", dest.importAnime],
-    ["MANGA", "Manga", dest.importManga],
-  ] as const) {
-    if (!enabled) continue;
-    for (let page = 1; ; page++) {
-      const data: { userRates: { id: string; anime: { malId: string | null } | null; manga: { malId: string | null } | null }[] } =
-        await client.request(query, { userId: externalUserId, targetType, page });
-      if (data.userRates.length === 0) break;
-      for (const r of data.userRates) {
-        const malId = kind === "ANIME" ? r.anime?.malId : r.manga?.malId;
-        if (malId) out[kind].set(Number(malId), r.id);
-      }
-      if (data.userRates.length < 50) break;
-    }
-  }
-  return out;
-}
-
 export async function runSync(userId: string, trigger: "manual" | "scheduled") {
   const config = await prisma.syncConfig.findUnique({ where: { userId }, include: { destinations: true } });
   if (!config?.sourceService) throw new Error("No source configured");
@@ -295,19 +256,45 @@ export async function runSync(userId: string, trigger: "manual" | "scheduled") {
   if (!sourceConn) throw new Error("Source account is not connected");
 
   const run = await prisma.syncRun.create({ data: { userId, trigger } });
+  log.info("run started", { runId: run.id, userId, trigger, source: config.sourceService });
   try {
     const sourceEntries = await fetchSourceEntries(config.sourceService as ServiceId, sourceConn);
+    log.info("fetched source list", { runId: run.id, source: config.sourceService, entries: sourceEntries.length });
 
     for (const dest of config.destinations) {
       if (!dest.enabled || dest.service === config.sourceService) continue;
       const destConn = connByService.get(dest.service as ServiceId);
-      if (!destConn) continue;
+      if (!destConn) {
+        log.warn("destination enabled but not connected, skipping", { runId: run.id, destination: dest.service });
+        continue;
+      }
 
       const filtered = filterForDestination(sourceEntries, dest);
       let outcome: DestinationResult;
-      if (dest.service === "MAL") outcome = await applyToMal(filtered, destConn, dest);
-      else if (dest.service === "ANILIST") outcome = await applyToAnilist(filtered, destConn, dest);
-      else outcome = await applyToShikimori(filtered, destConn, dest);
+      try {
+        if (dest.service === "MAL") outcome = await applyToMal(filtered, destConn, dest);
+        else if (dest.service === "ANILIST") outcome = await applyToAnilist(filtered, destConn, dest);
+        else outcome = await applyToShikimori(filtered, destConn, dest);
+      } catch (err) {
+        // One destination failing outright (bad token, provider outage)
+        // shouldn't take the whole run down with it — record it as fully
+        // skipped and keep going with the remaining destinations.
+        log.error("destination failed", { runId: run.id, destination: dest.service, error: (err as Error).message });
+        outcome = {
+          created: 0,
+          updated: 0,
+          skipped: filtered.length,
+          skippedEntries: filtered.map((e) => ({ malId: e.malId, title: e.title, reason: (err as Error).message })),
+        };
+      }
+
+      log.info("destination finished", {
+        runId: run.id,
+        destination: dest.service,
+        created: outcome.created,
+        updated: outcome.updated,
+        skipped: outcome.skipped,
+      });
 
       await prisma.syncRunResult.create({
         data: {
@@ -322,11 +309,13 @@ export async function runSync(userId: string, trigger: "manual" | "scheduled") {
     }
 
     await prisma.syncRun.update({ where: { id: run.id }, data: { status: "success", finishedAt: new Date() } });
+    log.info("run finished", { runId: run.id, status: "success" });
   } catch (err) {
     await prisma.syncRun.update({
       where: { id: run.id },
       data: { status: "error", finishedAt: new Date(), errorMessage: (err as Error).message },
     });
+    log.error("run failed", { runId: run.id, error: (err as Error).message });
     throw err;
   }
   return run.id;

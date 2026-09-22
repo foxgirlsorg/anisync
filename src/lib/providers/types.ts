@@ -18,7 +18,7 @@ export type NormalizedEntry = {
   priority: number; // 0 low, 1 normal, 2 high
   startDate: string | null; // YYYY-MM-DD
   finishDate: string | null; // YYYY-MM-DD
-  comments: string | null;
+  notes: string | null;
   customLists: string[];
 };
 

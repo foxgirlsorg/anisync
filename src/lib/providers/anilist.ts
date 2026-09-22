@@ -164,7 +164,7 @@ async function fetchList(accessToken: string, userId: number, type: "ANIME" | "M
         priority: e.priority ?? 0,
         startDate: fuzzyDateToIso(e.startedAt),
         finishDate: fuzzyDateToIso(e.completedAt),
-        comments: e.notes || null,
+        notes: e.notes || null,
         customLists: Object.entries(e.customLists ?? {})
           .filter(([, v]) => v)
           .map(([k]) => k),
@@ -213,7 +213,7 @@ export type AnilistWriteFields = Partial<{
   progress: boolean;
   score: boolean;
   ratingRoundMode: RatingRoundMode;
-  comments: boolean;
+  notes: boolean;
   startDate: boolean;
   finishDate: boolean;
   rewatches: boolean;
@@ -268,7 +268,7 @@ export async function upsertEntry(
   if (fields.score) {
     variables.score = universalToAnilistScore(entry.score, destinationScoreFormat, fields.ratingRoundMode ?? "NEAREST");
   }
-  if (fields.comments) variables.notes = entry.comments ?? undefined;
+  if (fields.notes) variables.notes = entry.notes ?? undefined;
   if (fields.startDate) variables.startedAt = isoToFuzzyDate(entry.startDate);
   if (fields.finishDate) variables.completedAt = isoToFuzzyDate(entry.finishDate);
   if (fields.rewatches) variables.repeat = entry.repeatCount;

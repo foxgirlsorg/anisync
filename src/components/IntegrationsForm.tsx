@@ -33,7 +33,13 @@ export default function IntegrationsForm() {
     fetch("/api/settings")
       .then((r) => r.json())
       .then((data) => {
-        setValues({ ...EMPTY, ...data.settings });
+        // /api/settings reports unset/secret fields as null; coalesce to ""
+        // so re-saving the form doesn't send null back for untouched fields.
+        const settings = data.settings ?? {};
+        setValues({
+          ...EMPTY,
+          ...Object.fromEntries(Object.entries(settings).map(([k, v]) => [k, v ?? ""])),
+        });
         setConfigured(data.configured ?? {});
       })
       .finally(() => setLoading(false));

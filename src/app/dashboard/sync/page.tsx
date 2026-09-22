@@ -33,7 +33,7 @@ export default async function SyncSettingsPage() {
       importProgress: existing?.importProgress ?? true,
       importRatings: existing?.importRatings ?? true,
       ratingRoundMode: (existing?.ratingRoundMode as "NEAREST" | "UP" | "DOWN") ?? "NEAREST",
-      importComments: existing?.importComments ?? false,
+      importNotes: existing?.importNotes ?? false,
       importCustomLists: existing?.importCustomLists ?? false,
       importStartDate: existing?.importStartDate ?? true,
       importFinishDate: existing?.importFinishDate ?? true,

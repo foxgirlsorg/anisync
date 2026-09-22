@@ -30,7 +30,7 @@ const destinationSchema = z.object({
   importProgress: z.boolean(),
   importRatings: z.boolean(),
   ratingRoundMode: z.enum(RATING_ROUND_MODES),
-  importComments: z.boolean(),
+  importNotes: z.boolean(),
   importCustomLists: z.boolean(),
   importStartDate: z.boolean(),
   importFinishDate: z.boolean(),

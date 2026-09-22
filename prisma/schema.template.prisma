@@ -71,7 +71,7 @@ model SyncDestinationConfig {
   importProgress    Boolean         @default(true)
   importRatings     Boolean         @default(true)
   ratingRoundMode   String          @default("NEAREST")
-  importComments    Boolean         @default(false)
+  importNotes       Boolean         @default(false)
   importCustomLists Boolean         @default(false)
   importStartDate   Boolean         @default(true)
   importFinishDate  Boolean         @default(true)

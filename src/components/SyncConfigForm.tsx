@@ -14,7 +14,7 @@ type Destination = {
   importProgress: boolean;
   importRatings: boolean;
   ratingRoundMode: "NEAREST" | "UP" | "DOWN";
-  importComments: boolean;
+  importNotes: boolean;
   importCustomLists: boolean;
   importStartDate: boolean;
   importFinishDate: boolean;
@@ -28,7 +28,7 @@ const TOGGLE_FIELDS: { key: keyof Destination; label: string }[] = [
   { key: "importStatus", label: "Title status changes" },
   { key: "importProgress", label: "Episode/chapter progress" },
   { key: "importRatings", label: "Ratings" },
-  { key: "importComments", label: "Comments" },
+  { key: "importNotes", label: "Notes" },
   { key: "importCustomLists", label: "Custom lists / tags" },
   { key: "importStartDate", label: "Start date" },
   { key: "importFinishDate", label: "Finish date" },

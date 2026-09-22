@@ -154,7 +154,7 @@ async function fetchList(accessToken: string, kind: "anime" | "manga"): Promise<
         priority: ls.priority ?? 0,
         startDate: ls.start_date ?? null,
         finishDate: ls.finish_date ?? null,
-        comments: ls.comments || null,
+        notes: ls.comments || null,
         customLists: ls.tags ?? [],
       });
     }
@@ -176,7 +176,7 @@ export type MalWriteFields = Partial<{
   progress: boolean;
   score: boolean;
   ratingRoundMode: RatingRoundMode;
-  comments: boolean;
+  notes: boolean;
   startDate: boolean;
   finishDate: boolean;
   rewatches: boolean;
@@ -205,7 +205,7 @@ export async function upsertEntry(
   if (fields.score) {
     body.set("score", String(universalToTenPointInt(entry.score, fields.ratingRoundMode ?? "NEAREST")));
   }
-  if (fields.comments && entry.comments) body.set("comments", entry.comments);
+  if (fields.notes && entry.notes) body.set("comments", entry.notes);
   if (fields.startDate && entry.startDate) body.set("start_date", entry.startDate);
   if (fields.finishDate && entry.finishDate) body.set("finish_date", entry.finishDate);
   if (fields.rewatches) {
