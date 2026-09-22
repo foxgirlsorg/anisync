@@ -95,6 +95,7 @@ function isoToFuzzyDate(iso: string | null): { year: number; month: number; day:
 }
 
 type AnilistListEntry = {
+  id: number;
   status: CanonicalStatus;
   score: number;
   progress: number;
@@ -108,12 +109,20 @@ type AnilistListEntry = {
   media: { idMal: number | null; title: { romaji: string } };
 };
 
-async function fetchList(accessToken: string, userId: number, type: "ANIME" | "MANGA"): Promise<NormalizedEntry[]> {
+/** Fetches the full list AND the malId -> AniList entry id map in one
+ * round trip — callers that need both (the sync engine, for diffing plus
+ * update/delete targets) used to fetch this twice. */
+async function fetchListWithEntryIds(
+  accessToken: string,
+  userId: number,
+  type: "ANIME" | "MANGA"
+): Promise<{ entries: NormalizedEntry[]; entryIds: Map<number, number> }> {
   const query = gql`
     query ($userId: Int, $type: MediaType) {
       MediaListCollection(userId: $userId, type: $type) {
         lists {
           entries {
+            id
             status
             score(format: POINT_100)
             progress
@@ -148,9 +157,11 @@ async function fetchList(accessToken: string, userId: number, type: "ANIME" | "M
     { userId, type }
   );
   const entries: NormalizedEntry[] = [];
+  const entryIds = new Map<number, number>();
   for (const list of data.MediaListCollection.lists) {
     for (const e of list.entries) {
       if (!e.media.idMal) continue; // not on MAL, can't map to the universal id
+      entryIds.set(e.media.idMal, e.id);
       entries.push({
         malId: e.media.idMal,
         mediaKind: type === "ANIME" ? "ANIME" : "MANGA",
@@ -171,15 +182,25 @@ async function fetchList(accessToken: string, userId: number, type: "ANIME" | "M
       });
     }
   }
-  return entries;
+  return { entries, entryIds };
 }
 
 export async function fetchAnimeList(accessToken: string, userId: number) {
-  return fetchList(accessToken, userId, "ANIME");
+  return (await fetchListWithEntryIds(accessToken, userId, "ANIME")).entries;
 }
 
 export async function fetchMangaList(accessToken: string, userId: number) {
-  return fetchList(accessToken, userId, "MANGA");
+  return (await fetchListWithEntryIds(accessToken, userId, "MANGA")).entries;
+}
+
+/** Used by the sync engine so it doesn't have to fetch the list twice to
+ * get both the normalized entries and the entry ids needed for updates. */
+export async function fetchAnimeListWithEntryIds(accessToken: string, userId: number) {
+  return fetchListWithEntryIds(accessToken, userId, "ANIME");
+}
+
+export async function fetchMangaListWithEntryIds(accessToken: string, userId: number) {
+  return fetchListWithEntryIds(accessToken, userId, "MANGA");
 }
 
 /** Bulk-resolves MAL ids to AniList internal media ids. */
@@ -289,35 +310,3 @@ export async function deleteEntryByMediaId(accessToken: string, entryId: number)
   await client(accessToken).request(mutation, { id: entryId });
 }
 
-/** AniList list entries are addressed by their own `id`, not by media id —
- * fetch a userId+mediaId -> entryId map for deletions in destructive mode. */
-export async function fetchEntryIds(
-  accessToken: string,
-  userId: number,
-  type: "ANIME" | "MANGA"
-): Promise<Map<number, number>> {
-  const query = gql`
-    query ($userId: Int, $type: MediaType) {
-      MediaListCollection(userId: $userId, type: $type) {
-        lists {
-          entries {
-            id
-            media {
-              idMal
-            }
-          }
-        }
-      }
-    }
-  `;
-  const data = await client(accessToken).request<{
-    MediaListCollection: { lists: { entries: { id: number; media: { idMal: number | null } }[] }[] };
-  }>(query, { userId, type });
-  const map = new Map<number, number>();
-  for (const list of data.MediaListCollection.lists) {
-    for (const e of list.entries) {
-      if (e.media.idMal) map.set(e.media.idMal, e.id);
-    }
-  }
-  return map;
-}

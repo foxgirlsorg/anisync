@@ -43,9 +43,10 @@ export default async function HistoryPage() {
               return (
                 <div key={r.id} className="rounded-md border border-border p-3 text-sm">
                   <div className="font-medium">{SERVICE_LABELS[r.destinationService as ServiceId]}</div>
-                  <div className="mt-1 flex gap-4 text-muted">
+                  <div className="mt-1 flex flex-wrap gap-4 text-muted">
                     <span>{r.created} created</span>
                     <span>{r.updated} updated</span>
+                    <span>{r.unchanged} already up to date</span>
                     <span className={r.skipped > 0 ? "text-danger" : ""}>{r.skipped} skipped</span>
                   </div>
                   {skipped.length > 0 && <SkippedList entries={skipped} />}

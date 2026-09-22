@@ -101,6 +101,7 @@ model SyncRunResult {
   destinationService String
   created            Int      @default(0)
   updated            Int      @default(0)
+  unchanged          Int      @default(0)
   skipped            Int      @default(0)
   skippedEntries     String? /*LONGTEXT*/
 

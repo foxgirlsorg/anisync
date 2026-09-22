@@ -3,6 +3,7 @@ import { ServiceId, RatingRoundMode } from "@/lib/constants";
 import { getFreshAccessToken } from "@/lib/providers/connection";
 import { getShikimoriCredentials } from "@/lib/settings";
 import { createLogger } from "@/lib/logger";
+import { universalToTenPointInt, universalToAnilistScore } from "@/lib/scoreConvert";
 import type { NormalizedEntry, SkippedEntry } from "@/lib/providers/types";
 import * as mal from "@/lib/providers/mal";
 import * as anilist from "@/lib/providers/anilist";
@@ -11,7 +12,51 @@ import type { SyncDestinationConfig, ServiceConnection } from "@/generated/prism
 
 const log = createLogger("sync");
 
-type DestinationResult = { created: number; updated: number; skipped: number; skippedEntries: SkippedEntry[] };
+type DestinationResult = {
+  created: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  skippedEntries: SkippedEntry[];
+};
+
+/** Fields shared by all three destinations' write-field option objects that
+ * don't need provider-specific conversion to compare (score is handled
+ * separately by the caller, since MAL/Shikimori's native scale and
+ * AniList's account-specific scoreFormat need different target values). */
+type DiffFields = Partial<{
+  status: boolean;
+  progress: boolean;
+  notes: boolean;
+  rewatches: boolean;
+  priority: boolean;
+  startDate: boolean;
+  finishDate: boolean;
+  customLists: boolean;
+}>;
+
+/** Whether `desired` (from the source list) differs from `existing` (the
+ * destination's current entry) in any field this destination is configured
+ * to sync — used to skip write calls entirely for entries that are already
+ * up to date, instead of re-writing every entry on every sync. */
+function hasNonScoreChanges(desired: NormalizedEntry, existing: NormalizedEntry, fields: DiffFields): boolean {
+  if (fields.status && desired.status !== existing.status) return true;
+  if (fields.progress) {
+    if (desired.progress !== existing.progress) return true;
+    if (desired.mediaKind === "MANGA" && (desired.progressVolumes ?? 0) !== (existing.progressVolumes ?? 0)) return true;
+  }
+  if (fields.notes && (desired.notes ?? "") !== (existing.notes ?? "")) return true;
+  if (fields.rewatches && desired.repeatCount !== existing.repeatCount) return true;
+  if (fields.priority && desired.priority !== existing.priority) return true;
+  if (fields.startDate && desired.startDate !== existing.startDate) return true;
+  if (fields.finishDate && desired.finishDate !== existing.finishDate) return true;
+  if (fields.customLists) {
+    const a = [...desired.customLists].sort().join(",");
+    const b = [...existing.customLists].sort().join(",");
+    if (a !== b) return true;
+  }
+  return false;
+}
 
 async function fetchSourceEntries(service: ServiceId, conn: ServiceConnection): Promise<NormalizedEntry[]> {
   const token = await getFreshAccessToken(conn.userId, service);
@@ -40,9 +85,9 @@ function filterForDestination(entries: NormalizedEntry[], dest: SyncDestinationC
 async function applyToMal(entries: NormalizedEntry[], conn: ServiceConnection, dest: SyncDestinationConfig): Promise<DestinationResult> {
   const token = await getFreshAccessToken(conn.userId, "MAL");
   const [existingAnime, existingManga] = await Promise.all([mal.fetchAnimeList(token), mal.fetchMangaList(token)]);
-  const existingIds = new Set([...existingAnime, ...existingManga].map((e) => `${e.mediaKind}:${e.malId}`));
+  const existingByKey = new Map([...existingAnime, ...existingManga].map((e) => [`${e.mediaKind}:${e.malId}`, e]));
 
-  const result: DestinationResult = { created: 0, updated: 0, skipped: 0, skippedEntries: [] };
+  const result: DestinationResult = { created: 0, updated: 0, unchanged: 0, skipped: 0, skippedEntries: [] };
   const writeFields = {
     status: dest.importStatus,
     progress: dest.importProgress,
@@ -56,12 +101,22 @@ async function applyToMal(entries: NormalizedEntry[], conn: ServiceConnection, d
     customLists: dest.importCustomLists,
   };
   for (const entry of entries) {
+    const existing = existingByKey.get(`${entry.mediaKind}:${entry.malId}`);
+    if (existing) {
+      const scoreTarget = writeFields.score ? universalToTenPointInt(entry.score, writeFields.ratingRoundMode) : null;
+      const scoreChanged = scoreTarget != null && scoreTarget !== Math.round(existing.score);
+      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+        result.unchanged++;
+        continue;
+      }
+    }
     try {
-      const existed = existingIds.has(`${entry.mediaKind}:${entry.malId}`);
+      log.info(existing ? "updating entry" : "creating entry", { destination: "MAL", malId: entry.malId, title: entry.title });
       await mal.upsertEntry(token, entry, writeFields);
-      if (existed) result.updated++;
+      if (existing) result.updated++;
       else result.created++;
     } catch (err) {
+      log.error("write failed", { destination: "MAL", malId: entry.malId, title: entry.title, error: (err as Error).message });
       result.skipped++;
       result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: (err as Error).message });
     }
@@ -100,16 +155,26 @@ async function applyToAnilist(
   const animeEntries = entries.filter((e) => e.mediaKind === "ANIME");
   const mangaEntries = entries.filter((e) => e.mediaKind === "MANGA");
 
-  const [existingAnimeIds, existingMangaIds] = await Promise.all([
-    dest.importAnime ? anilist.fetchEntryIds(token, userId, "ANIME") : Promise.resolve(new Map<number, number>()),
-    dest.importManga ? anilist.fetchEntryIds(token, userId, "MANGA") : Promise.resolve(new Map<number, number>()),
+  const [animeResult, mangaResult] = await Promise.all([
+    dest.importAnime
+      ? anilist.fetchAnimeListWithEntryIds(token, userId)
+      : Promise.resolve({ entries: [] as NormalizedEntry[], entryIds: new Map<number, number>() }),
+    dest.importManga
+      ? anilist.fetchMangaListWithEntryIds(token, userId)
+      : Promise.resolve({ entries: [] as NormalizedEntry[], entryIds: new Map<number, number>() }),
   ]);
+  const existingByKind = {
+    ANIME: new Map(animeResult.entries.map((e) => [e.malId, e])),
+    MANGA: new Map(mangaResult.entries.map((e) => [e.malId, e])),
+  };
+  const entryIdsByKind = { ANIME: animeResult.entryIds, MANGA: mangaResult.entryIds };
+
   const [animeMediaIds, mangaMediaIds] = await Promise.all([
     dest.importAnime ? anilist.resolveMediaIds(token, animeEntries.map((e) => e.malId), "ANIME") : Promise.resolve(new Map<number, number>()),
     dest.importManga ? anilist.resolveMediaIds(token, mangaEntries.map((e) => e.malId), "MANGA") : Promise.resolve(new Map<number, number>()),
   ]);
 
-  const result: DestinationResult = { created: 0, updated: 0, skipped: 0, skippedEntries: [] };
+  const result: DestinationResult = { created: 0, updated: 0, unchanged: 0, skipped: 0, skippedEntries: [] };
   const writeFields = {
     status: dest.importStatus,
     progress: dest.importProgress,
@@ -125,18 +190,31 @@ async function applyToAnilist(
 
   for (const entry of entries) {
     const mediaIds = entry.mediaKind === "ANIME" ? animeMediaIds : mangaMediaIds;
-    const existingIds = entry.mediaKind === "ANIME" ? existingAnimeIds : existingMangaIds;
+    const existing = existingByKind[entry.mediaKind].get(entry.malId);
     const mediaId = mediaIds.get(entry.malId);
     if (!mediaId) {
       result.skipped++;
       result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: "Not found on AniList" });
       continue;
     }
+    if (existing) {
+      const scoreTarget = writeFields.score
+        ? universalToAnilistScore(entry.score, destScoreFormat, writeFields.ratingRoundMode)
+        : null;
+      const currentScore = writeFields.score ? universalToAnilistScore(existing.score, destScoreFormat, "NEAREST") : null;
+      const scoreChanged = scoreTarget != null && Math.abs(scoreTarget - currentScore!) > 0.05;
+      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+        result.unchanged++;
+        continue;
+      }
+    }
     try {
+      log.info(existing ? "updating entry" : "creating entry", { destination: "ANILIST", malId: entry.malId, title: entry.title });
       await anilist.upsertEntry(token, mediaId, entry, destScoreFormat, writeFields);
-      if (existingIds.has(entry.malId)) result.updated++;
+      if (existing) result.updated++;
       else result.created++;
     } catch (err) {
+      log.error("write failed", { destination: "ANILIST", malId: entry.malId, title: entry.title, error: (err as Error).message });
       result.skipped++;
       result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: (err as Error).message });
     }
@@ -145,7 +223,7 @@ async function applyToAnilist(
   if (dest.destructive) {
     const sourceAnimeIds = new Set(animeEntries.map((e) => e.malId));
     const sourceMangaIds = new Set(mangaEntries.map((e) => e.malId));
-    for (const [malId, entryId] of existingAnimeIds) {
+    for (const [malId, entryId] of entryIdsByKind.ANIME) {
       if (!sourceAnimeIds.has(malId)) {
         try {
           await anilist.deleteEntryByMediaId(token, entryId);
@@ -154,7 +232,7 @@ async function applyToAnilist(
         }
       }
     }
-    for (const [malId, entryId] of existingMangaIds) {
+    for (const [malId, entryId] of entryIdsByKind.MANGA) {
       if (!sourceMangaIds.has(malId)) {
         try {
           await anilist.deleteEntryByMediaId(token, entryId);
@@ -194,7 +272,7 @@ async function applyToShikimori(
   };
   const rateIdByKind = { ANIME: animeResult.rateIds, MANGA: mangaResult.rateIds };
 
-  const result: DestinationResult = { created: 0, updated: 0, skipped: 0, skippedEntries: [] };
+  const result: DestinationResult = { created: 0, updated: 0, unchanged: 0, skipped: 0, skippedEntries: [] };
   const writeFields = {
     status: dest.importStatus,
     progress: dest.importProgress,
@@ -207,8 +285,18 @@ async function applyToShikimori(
   for (const entry of entries) {
     const existingMap = existingByKind[entry.mediaKind];
     const rateIdMap = rateIdByKind[entry.mediaKind];
+    const existing = existingMap.get(entry.malId);
+    if (existing) {
+      const scoreTarget = writeFields.score ? universalToTenPointInt(entry.score, writeFields.ratingRoundMode) : null;
+      const scoreChanged = scoreTarget != null && scoreTarget !== Math.round(existing.score);
+      if (!scoreChanged && !hasNonScoreChanges(entry, existing, writeFields)) {
+        result.unchanged++;
+        continue;
+      }
+    }
     try {
-      if (existingMap.has(entry.malId)) {
+      if (existing) {
+        log.info("updating entry", { destination: "SHIKIMORI", malId: entry.malId, title: entry.title });
         await shikimori.updateEntry(token, creds.appName, rateIdMap.get(entry.malId)!, entry, writeFields);
         result.updated++;
       } else {
@@ -218,10 +306,12 @@ async function applyToShikimori(
           result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: "Not found on Shikimori" });
           continue;
         }
+        log.info("creating entry", { destination: "SHIKIMORI", malId: entry.malId, title: entry.title });
         await shikimori.createEntry(token, creds.appName, conn.externalUserId!, targetId, entry, writeFields);
         result.created++;
       }
     } catch (err) {
+      log.error("write failed", { destination: "SHIKIMORI", malId: entry.malId, title: entry.title, error: (err as Error).message });
       result.skipped++;
       result.skippedEntries.push({ malId: entry.malId, title: entry.title, reason: (err as Error).message });
     }
@@ -283,6 +373,7 @@ export async function runSync(userId: string, trigger: "manual" | "scheduled") {
         outcome = {
           created: 0,
           updated: 0,
+          unchanged: 0,
           skipped: filtered.length,
           skippedEntries: filtered.map((e) => ({ malId: e.malId, title: e.title, reason: (err as Error).message })),
         };
@@ -293,6 +384,7 @@ export async function runSync(userId: string, trigger: "manual" | "scheduled") {
         destination: dest.service,
         created: outcome.created,
         updated: outcome.updated,
+        unchanged: outcome.unchanged,
         skipped: outcome.skipped,
       });
 
