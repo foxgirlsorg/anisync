@@ -83,7 +83,9 @@ docker compose --profile mariadb up -d --build
 
 ```bash
 npm install
-cp .env.example .env   # DATABASE_URL=file:./dev.db works as-is
+cp .env.example .env
+# edit .env: set DATABASE_URL=file:./dev.db (the default targets Docker's
+# bind-mounted path, which doesn't exist when running outside Docker)
 npm run dev            # applies migrations + generates the Prisma client first
 ```
 
